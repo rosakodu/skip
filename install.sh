@@ -22,62 +22,74 @@ NC='\033[0m'
 
 log()    { echo -e "${BLUE}[SKIP]${NC} $*"; }
 warn()   { echo -e "${WHITE}[WARN]${NC} $*"; }
-err()    { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+err()    { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-log "Проверка sudo..."
+log "Проверка sudo (введите пароль один раз, если потребуется)..."
 sudo -v || err "Не удалось получить права sudo"
 sudo -v -n || true
 
-# Отключаем readonly если SteamOS
+# Отключаем readonly, если SteamOS
 if command -v steamos-readonly >/dev/null 2>&1; then
-    log "Отключаем readonly..."
-    sudo steamos-readonly disable || true
+    log "Отключаем readonly режим..."
+    sudo steamos-readonly disable || true   # если уже rw — просто предупреждение
 fi
 
 # ─── Установка в домашний каталог ~/zapretdeck ───────────────────────────────
 INSTALL_DIR="$HOME/zapretdeck"
-log "Устанавливаем в домашний каталог: $INSTALL_DIR"
+log "Устанавливаем всё в домашний каталог: $INSTALL_DIR"
 
 mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/zapret-latest" "$INSTALL_DIR/custom-strategies"
 
+# Временная папка для скачивания
 WORKDIR="$HOME/Downloads/zapretdeck_tmp_$$"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR" || err "Не удалось перейти во временную папку"
 
-VERSION="v.0.1.8"
+VERSION="v.0.1.8"   # ПАТЧ: правильный тег релиза (с точкой после v)
 ARCHIVE="ZapretDeck_v0.1.8.tar.gz"
 URL="https://github.com/rosakodu/zapretdeck/releases/download/${VERSION}/${ARCHIVE}"
 
-log "Скачиваем архив..."
-curl -f -L -o "$ARCHIVE" "$URL" || err "Не удалось скачать архив"
+log "Скачиваем ZapretDeck ${VERSION}..."
+curl -f -L -o "$ARCHIVE" "$URL" || err "Не удалось скачать архив (404 или ошибка сети). Проверь URL: $URL"
 
+# Проверка размера архива
 FILE_SIZE=$(stat -c %s "$ARCHIVE" 2>/dev/null || echo 0)
-(( FILE_SIZE < 1000000 )) && err "Архив слишком маленький (${FILE_SIZE} байт) — ошибка загрузки?"
+log "Размер скачанного файла: ${FILE_SIZE} байт"
 
-log "Распаковываем в домашний каталог..."
-tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" --strip-components=1 || err "Ошибка распаковки"
+if [[ $FILE_SIZE -lt 1000000 ]]; then
+    warn "Файл слишком маленький — вероятно скачана страница ошибки GitHub (404)"
+    log "Первые 300 байт файла (диагностика):"
+    head -c 300 "$ARCHIVE"
+    err "Скачан невалидный архив. Проверьте https://github.com/rosakodu/zapretdeck/releases"
+fi
 
-# Удаляем временный архив
+log "Распаковываем архив в $INSTALL_DIR..."
+tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" --strip-components=1 || err "Ошибка распаковки. Файл повреждён или не .tar.gz"
+
+# Удаляем временный файл
 rm -f "$ARCHIVE"
+
 cd "$INSTALL_DIR" || err "Не удалось перейти в $INSTALL_DIR"
 
-# Делаем исполняемыми нужные файлы
+# Делаем исполняемыми нужные скрипты
 chmod +x nfqws main_script.sh stop_and_clean_nft.sh rename_bat.sh 2>/dev/null || true
 
-# Создаём/обновляем conf.env
-cat > conf.env << 'EOF'
+# Создаём conf.env, если его нет
+if [[ ! -f conf.env ]]; then
+    cat > conf.env << 'EOF'
 interface=any
 auto_update=false
 strategy=
 gamefilter=false
 EOF
-chmod 666 conf.env
+    chmod 666 conf.env
+fi
 
-log "Установка завершена. Всё в $INSTALL_DIR"
+log "Установка завершена. Всё готово в $HOME/zapretdeck"
 
-# ─── Автоподбор стратегии ────────────────────────────────────────────────────
+# ─── Запуск автоподбора стратегий ────────────────────────────────────────────
 log "Запускаем автоподбор стратегии..."
-./main_script.sh auto || err "Автоподбор стратегии завершился с ошибкой"
+./main_script.sh auto || err "Автоподбор завершился с ошибкой"
 
 sleep 8
 
@@ -87,11 +99,11 @@ if curl -4fs --connect-timeout 12 https://www.youtube.com >/dev/null 2>&1; then
 else
     warn "YouTube НЕ доступен после автоподбора"
     warn "Смотрите лог: $INSTALL_DIR/debug.log"
-    warn "Возможно, ни одна стратегия не подошла — попробуйте запустить ZapretDeck вручную"
+    warn "Возможно, ни одна стратегия не подошла — запустите ./main_script.sh вручную"
 fi
 
-# ─── WARP ────────────────────────────────────────────────────────────────────
-log "Устанавливаем и подключаем Cloudflare WARP..."
+# ─── Установка и подключение WARP ────────────────────────────────────────────
+log "Устанавливаем Cloudflare WARP..."
 
 sudo pacman-key --init || true
 sudo pacman-key --populate || true
@@ -116,7 +128,7 @@ warp-cli mode warp+doh || true
 
 CONNECTED=false
 for i in {1..10}; do
-    log "Попытка подключения WARP #$i"
+    log "Попытка подключения WARP #$i..."
     warp-cli connect || true
     sleep 5
     if warp-cli status 2>/dev/null | grep -qi "Connected"; then
@@ -126,16 +138,13 @@ for i in {1..10}; do
     fi
 done
 
-if [[ $CONNECTED != true ]]; then
-    warn "WARP не подключился автоматически"
-    warn "Запустите вручную: warp-cli connect"
-fi
+[[ $CONNECTED != true ]] && warn "WARP не подключился автоматически — попробуйте warp-cli connect"
 
-# ─── Завершение ──────────────────────────────────────────────────────────────
+# ─── Обновление SteamOS и завершение ─────────────────────────────────────────
 if command -v steamos-update >/dev/null 2>&1; then
     log "Проверяем и применяем обновления SteamOS..."
     sudo steamos-update check || true
-    sudo steamos-update || warn "Обновление SteamOS завершилось с предупреждениями"
+    sudo steamos-update || warn "Обновление завершилось с предупреждениями"
 fi
 
 if command -v steamos-readonly >/dev/null 2>&1; then
@@ -146,7 +155,7 @@ fi
 log ""
 log "──────────────────────────────────────────────"
 log "         SKIP завершён!"
-log "   Всё установлено в $HOME/zapretdeck"
+log "   Всё в $HOME/zapretdeck"
 log "   Перезагрузка через 10 секунд (Ctrl+C — отменить)"
 log "──────────────────────────────────────────────"
 sleep 10
