@@ -14,147 +14,134 @@ _____/\\\\\\\\\\\____/\\\________/\\\__/\\\\\\\\\\\__/\\\\\\\\\\\\\___
         ___\///////////_____\///________\///__\///////////__\///______________
 EOF
 
-# ================== LOGS ==================
-log() { echo -e "[INFO] $*"; }
-warn() { echo -e "[WARN] $*"; }
-err() { echo -e "[ERR] $*" >&2; exit 1; }
+# =============================================
+#   SKIP installer — ZapretDeck + WARP
+#   (rosakodu/skip)
+# =============================================
 
-# ================== READONLY ==================
-log "Disabling SteamOS readonly..."
-sudo steamos-readonly disable
+WHITE='\033[1;37m'
+BLUE='\033[1;34m'
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+NC='\033[0m'
 
-# ================== CONSTANTS ==================
-ZAPRET_DIR="/opt/zapret"
-ZAPRET_REPO="https://github.com/Sergeydigl3/zapret-discord-youtube-linux"
-NFQWS_PATH="$ZAPRET_DIR/nfqws"
+log()    { echo -e "${BLUE}[SKIP]${NC} $*"; }
+warn()   { echo -e "${WHITE}[WARN]${NC} $*"; }
+err()    { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-CHAOTIC_KEY="3056513887B78AEB"
-CHAOTIC_KEY_URL="https://cdn-mirror.chaotic.cx/chaotic-aur"
-WARP_PACKAGE="cloudflare-warp-bin"
+# ─── Предварительный запрос sudo-пароля (чтобы не просил много раз) ───────────
+log "Проверка sudo (введите пароль один раз, если потребуется)..."
+sudo -v || err "Не удалось получить права sudo"
+# Продлеваем кэш sudo на 15 минут (чтобы не просил повторно)
+sudo -v -n || true
 
-# ================== NFTABLES ==================
-install_nftables() {
-    command -v nft >/dev/null 2>&1 && return
-    log "Installing nftables..."
-    sudo pacman -S --noconfirm nftables
-    sudo systemctl enable --now nftables.service || warn "Cannot enable nftables.service"
-}
+# ─── 1. Отключение readonly (SteamOS) ───────────────────────────────────────
+if command -v steamos-readonly >/dev/null 2>&1; then
+    log "Отключаем readonly режим..."
+    sudo steamos-readonly disable || err "Не удалось отключить readonly"
+fi
 
-check_nftables() {
-    sudo nft list tables >/dev/null 2>&1 || err "nftables installed but not working"
-    log "nftables OK"
-}
+# ─── 2. Скачивание и установка ZapretDeck ────────────────────────────────────
+WORKDIR="$HOME/Downloads/zapretdeck_install_$$"
+mkdir -p "$WORKDIR"
+cd "$WORKDIR" || err "Не удалось перейти в $WORKDIR"
 
-# ================== ZAPRET ==================
-setup_zapret() {
-    install_nftables
-    check_nftables
+LATEST_VERSION="v0.1.8"   # Обновляй эту строку при выходе новой версии
+ARCHIVE="ZapretDeck_${LATEST_VERSION}.tar.gz"
+URL="https://github.com/rosakodu/zapretdeck/releases/download/${LATEST_VERSION}/$ARCHIVE"
 
-    [[ -d "$ZAPRET_DIR" ]] || sudo git clone "$ZAPRET_REPO" "$ZAPRET_DIR"
-    cd "$ZAPRET_DIR"
-    chmod +x ./install.sh
-    chmod +x ./nfqws
+log "Скачиваем ZapretDeck $LATEST_VERSION..."
+curl -L -o "$ARCHIVE" "$URL" || err "Не удалось скачать $URL"
 
-    STRATEGIES=(general*.bat discord.bat)
-    SUCCESS=false
+log "Распаковываем..."
+tar -xzf "$ARCHIVE" --strip-components=1 || err "Ошибка распаковки"
 
-    for strat in "${STRATEGIES[@]}"; do
-        log "Trying strategy: $strat"
-        ./install.sh --strategy "$strat" --nointeractive
-        sleep 3
+rm -f "$ARCHIVE"
 
-        # Проверка nfqws
-        if ! pgrep -f nfqws >/dev/null 2>&1; then
-            warn "nfqws not running, trying next strategy"
-            continue
-        fi
+chmod +x install.sh || err "install.sh не найден или не стал исполняемым"
 
-        # Проверка ping + curl
-        ping -c 2 youtube.com >/dev/null 2>&1 || { warn "Ping failed, trying next strategy"; continue; }
-        curl -fsSL https://www.youtube.com >/dev/null 2>&1 || { warn "HTTP failed, trying next strategy"; continue; }
+log "Запускаем установку ZapretDeck..."
+sudo ./install.sh || err "Установка ZapretDeck провалилась"
 
-        SUCCESS=true
-        log "Strategy $strat successful"
+# ─── 3. Запуск автоподбора стратегии ─────────────────────────────────────────
+log "Запускаем автоподбор стратегии в ZapretDeck..."
+sudo /opt/zapretdeck/main_script.sh auto || err "Автоподбор стратегии не удался"
+
+sleep 6
+
+# Проверка результата
+log "Проверяем доступ к YouTube..."
+if curl -4fs --connect-timeout 10 https://www.youtube.com >/dev/null 2>&1; then
+    log "Обход работает — YouTube доступен ✓"
+else
+    warn "YouTube всё ещё недоступен после автоподбора"
+    warn "Возможно, стоит запустить ZapretDeck вручную и выбрать другую стратегию"
+    # Можно добавить exit 1, если хочешь жёсткую остановку
+fi
+
+# ─── 4. Установка и настройка WARP ───────────────────────────────────────────
+log "Устанавливаем Cloudflare WARP (chaotic-aur)..."
+
+sudo pacman-key --init || true
+sudo pacman-key --populate || true
+sudo pacman-key --recv-key --keyserver keyserver.ubuntu.com 3056513887B78AEB
+sudo pacman-key --lsign-key 3056513887B78AEB
+
+sudo pacman -U --noconfirm \
+    https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-keyring.pkg.tar.zst \
+    https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst || true
+
+if ! grep -q "\[chaotic-aur\]" /etc/pacman.conf; then
+    echo -e "\n[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist" | sudo tee -a /etc/pacman.conf
+fi
+
+sudo pacman -Syy
+sudo pacman -S --noconfirm --needed cloudflare-warp-bin || err "Не удалось установить cloudflare-warp-bin"
+
+log "Запускаем и подключаем WARP..."
+sudo systemctl enable --now warp-svc || err "Не удалось запустить warp-svc"
+
+warp-cli registration new || true
+warp-cli mode warp+doh || true
+
+CONNECTED=false
+for i in {1..10}; do
+    warp-cli connect || true
+    sleep 5
+    if warp-cli status 2>/dev/null | grep -qi "Connected"; then
+        log "WARP успешно подключён ✓"
+        CONNECTED=true
         break
-    done
-
-    $SUCCESS || err "No strategy worked for zapret"
-}
-
-# ================== WARP ==================
-install_aur_warp() {
-    log "Installing Chaotic-AUR keyring..."
-    sudo pacman-key --init
-    sudo pacman-key --populate
-    sudo pacman-key --recv-key $CHAOTIC_KEY --keyserver keyserver.ubuntu.com
-    sudo pacman-key --lsign-key $CHAOTIC_KEY
-
-    sudo pacman -U --noconfirm \
-        $CHAOTIC_KEY_URL/chaotic-keyring.pkg.tar.zst \
-        $CHAOTIC_KEY_URL/chaotic-mirrorlist.pkg.tar.zst
-
-    grep -q "\[chaotic-aur]" /etc/pacman.conf || \
-        echo -e "\n[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist" | sudo tee -a /etc/pacman.conf
-
-    sudo pacman -Syy
-
-    log "Installing Cloudflare WARP..."
-    sudo pacman -S --noconfirm $WARP_PACKAGE
-
-    sudo systemctl enable --now warp-svc
-}
-
-connect_warp() {
-    log "Registering and connecting WARP..."
-    warp-cli registration new || true
-    warp-cli mode warp+doh || true
-
-    for i in {1..5}; do
-        warp-cli connect || true
-        sleep 5
-        if warp-cli status | grep -qi "Connected"; then
-            log "WARP successfully connected"
-            return
-        fi
-        warn "WARP connection attempt $i failed, retrying..."
-    done
-    err "WARP failed to connect"
-}
-
-# ================== STEAMOS UPDATE ==================
-update_steamos() {
-    log "Running SteamOS update..."
-    if ! command -v steamos-update >/dev/null 2>&1; then
-        warn "steamos-update not found, skipping"
-        return
     fi
+    warn "Попытка $i / 10..."
+done
 
-    sudo steamos-update check || warn "No updates available"
-    sudo steamos-update || warn "Update finished with warnings"
-    log "SteamOS update completed"
-}
+if [[ $CONNECTED != true ]]; then
+    warn "Не удалось подключить WARP автоматически"
+    warn "Попробуйте вручную: warp-cli connect"
+fi
 
-# ================== MAIN ==================
-main() {
-    # 1. Устанавливаем zapret и находим рабочую стратегию
-    setup_zapret
+# ─── 5. Обновление SteamOS (если доступно) ───────────────────────────────────
+if command -v steamos-update >/dev/null 2>&1; then
+    log "Проверяем и применяем обновления SteamOS..."
+    sudo steamos-update check || true
+    sudo steamos-update || warn "Обновление SteamOS завершилось с предупреждениями"
+else
+    log "steamos-update не найден — пропускаем обновление"
+fi
 
-    # 2. Устанавливаем Chaotic-AUR + WARP
-    install_aur_warp
+# ─── 6. Возврат readonly и перезагрузка ──────────────────────────────────────
+if command -v steamos-readonly >/dev/null 2>&1; then
+    log "Возвращаем readonly режим..."
+    sudo steamos-readonly enable || true
+fi
 
-    # 3. Подключаем WARP и проверяем соединение
-    connect_warp
+log ""
+log "──────────────────────────────────────────────"
+log "         SKIP завершён!"
+log "   ZapretDeck + автоподбор + WARP (если подключился)"
+log "   Перезагрузка через 10 секунд (Ctrl+C — отменить)"
+log "──────────────────────────────────────────────"
+sleep 10
 
-    # 4. Только после успешного WARP обновляем SteamOS
-    update_steamos
-
-    # 5. Включаем readonly
-    log "Re-enabling SteamOS readonly..."
-    sudo steamos-readonly enable
-
-    # 6. Перезагрузка
-    log "Rebooting Steam Deck..."
-    sudo reboot
-}
-
-main
+sudo reboot
