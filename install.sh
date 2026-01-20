@@ -14,11 +14,6 @@ _____\///\\\\\\\\\\\/___\/\\\______\//\\\__/\\\\\\\\\\\_\/\\\_____________
 ______\///////////_____\///________\///__\///////////__\///______________
 EOF
 
-# =============================================
-#   SKIP installer — ZapretDeck + WARP
-#   (rosakodu/skip)
-# =============================================
-
 WHITE='\033[1;37m'
 BLUE='\033[1;34m'
 RED='\033[1;31m'
@@ -29,65 +24,74 @@ log()    { echo -e "${BLUE}[SKIP]${NC} $*"; }
 warn()   { echo -e "${WHITE}[WARN]${NC} $*"; }
 err()    { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# ─── Предварительный запрос sudo ─────────────────────────────────────────────
-log "Проверка sudo (введите пароль один раз, если потребуется)..."
+log "Проверка sudo..."
 sudo -v || err "Не удалось получить права sudo"
 sudo -v -n || true
 
-# ─── 1. Отключение readonly ──────────────────────────────────────────────────
+# Отключаем readonly если SteamOS
 if command -v steamos-readonly >/dev/null 2>&1; then
-    log "Отключаем readonly режим..."
-    sudo steamos-readonly disable || err "Не удалось отключить readonly"
+    log "Отключаем readonly..."
+    sudo steamos-readonly disable || true
 fi
 
-# ─── 2. Скачивание и установка ZapretDeck ────────────────────────────────────
-WORKDIR="$HOME/Downloads/zapretdeck_install_$$"
+# ─── Установка в домашний каталог ~/zapretdeck ───────────────────────────────
+INSTALL_DIR="$HOME/zapretdeck"
+log "Устанавливаем в домашний каталог: $INSTALL_DIR"
+
+mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/zapret-latest" "$INSTALL_DIR/custom-strategies"
+
+WORKDIR="$HOME/Downloads/zapretdeck_tmp_$$"
 mkdir -p "$WORKDIR"
-cd "$WORKDIR" || err "Не удалось перейти в $WORKDIR"
+cd "$WORKDIR" || err "Не удалось перейти во временную папку"
 
-LATEST_VERSION="v.0.1.8"   # ← ПАТЧ: тег релиза именно "v.0.1.8" (с точкой!)
+VERSION="v.0.1.8"
 ARCHIVE="ZapretDeck_v0.1.8.tar.gz"
-URL="https://github.com/rosakodu/zapretdeck/releases/download/${LATEST_VERSION}/${ARCHIVE}"
+URL="https://github.com/rosakodu/zapretdeck/releases/download/${VERSION}/${ARCHIVE}"
 
-log "Скачиваем ZapretDeck ${LATEST_VERSION}..."
-curl -f -L -o "$ARCHIVE" "$URL" || err "Не удалось скачать архив (HTTP ошибка или 404). Проверь URL: $URL"
+log "Скачиваем архив..."
+curl -f -L -o "$ARCHIVE" "$URL" || err "Не удалось скачать архив"
 
-# Проверка размера файла (должен быть >> 1 МБ)
 FILE_SIZE=$(stat -c %s "$ARCHIVE" 2>/dev/null || echo 0)
-if [[ $FILE_SIZE -lt 1000000 ]]; then
-    warn "Скачанный файл слишком маленький (${FILE_SIZE} байт) — вероятно ошибка GitHub (404 или redirect)"
-    log "Первые 300 байт файла (для диагностики):"
-    head -c 300 "$ARCHIVE"
-    err "Скачан невалидный архив. Возможно, версия устарела — проверь https://github.com/rosakodu/zapretdeck/releases"
-fi
+(( FILE_SIZE < 1000000 )) && err "Архив слишком маленький (${FILE_SIZE} байт) — ошибка загрузки?"
 
-log "Распаковываем архив (${FILE_SIZE} байт)..."
-tar -xzf "$ARCHIVE" --strip-components=1 || err "Ошибка распаковки. Файл повреждён или не .tar.gz"
+log "Распаковываем в домашний каталог..."
+tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" --strip-components=1 || err "Ошибка распаковки"
 
+# Удаляем временный архив
 rm -f "$ARCHIVE"
+cd "$INSTALL_DIR" || err "Не удалось перейти в $INSTALL_DIR"
 
-chmod +x install.sh || err "install.sh не найден или не стал исполняемым"
+# Делаем исполняемыми нужные файлы
+chmod +x nfqws main_script.sh stop_and_clean_nft.sh rename_bat.sh 2>/dev/null || true
 
-log "Запускаем установку ZapretDeck..."
-sudo ./install.sh || err "Установка ZapretDeck провалилась"
+# Создаём/обновляем conf.env
+cat > conf.env << 'EOF'
+interface=any
+auto_update=false
+strategy=
+gamefilter=false
+EOF
+chmod 666 conf.env
 
-# ─── 3. Автоподбор стратегии ─────────────────────────────────────────────────
-log "Запускаем автоподбор стратегии в ZapretDeck..."
-sudo /opt/zapretdeck/main_script.sh auto || err "Автоподбор стратегии не удался"
+log "Установка завершена. Всё в $INSTALL_DIR"
 
-sleep 6
+# ─── Автоподбор стратегии ────────────────────────────────────────────────────
+log "Запускаем автоподбор стратегии..."
+./main_script.sh auto || err "Автоподбор стратегии завершился с ошибкой"
+
+sleep 8
 
 log "Проверяем доступ к YouTube..."
-if curl -4fs --connect-timeout 10 https://www.youtube.com >/dev/null 2>&1; then
-    log "Обход работает — YouTube доступен ✓"
+if curl -4fs --connect-timeout 12 https://www.youtube.com >/dev/null 2>&1; then
+    log "YouTube доступен ✓ — обход работает"
 else
-    warn "YouTube всё ещё недоступен после автоподбора"
-    warn "Возможно, стоит запустить ZapretDeck вручную и выбрать другую стратегию"
-    # exit 1   # ← раскомментируй, если хочешь остановить скрипт при неудаче
+    warn "YouTube НЕ доступен после автоподбора"
+    warn "Смотрите лог: $INSTALL_DIR/debug.log"
+    warn "Возможно, ни одна стратегия не подошла — попробуйте запустить ZapretDeck вручную"
 fi
 
-# ─── 4. WARP ─────────────────────────────────────────────────────────────────
-log "Устанавливаем Cloudflare WARP (chaotic-aur)..."
+# ─── WARP ────────────────────────────────────────────────────────────────────
+log "Устанавливаем и подключаем Cloudflare WARP..."
 
 sudo pacman-key --init || true
 sudo pacman-key --populate || true
@@ -105,7 +109,6 @@ fi
 sudo pacman -Syy
 sudo pacman -S --noconfirm --needed cloudflare-warp-bin || err "Не удалось установить cloudflare-warp-bin"
 
-log "Запускаем и подключаем WARP..."
 sudo systemctl enable --now warp-svc || err "Не удалось запустить warp-svc"
 
 warp-cli registration new || true
@@ -113,6 +116,7 @@ warp-cli mode warp+doh || true
 
 CONNECTED=false
 for i in {1..10}; do
+    log "Попытка подключения WARP #$i"
     warp-cli connect || true
     sleep 5
     if warp-cli status 2>/dev/null | grep -qi "Connected"; then
@@ -120,24 +124,20 @@ for i in {1..10}; do
         CONNECTED=true
         break
     fi
-    warn "Попытка $i / 10..."
 done
 
 if [[ $CONNECTED != true ]]; then
-    warn "Не удалось подключить WARP автоматически"
-    warn "Попробуйте вручную: warp-cli connect"
+    warn "WARP не подключился автоматически"
+    warn "Запустите вручную: warp-cli connect"
 fi
 
-# ─── 5. Обновление SteamOS ───────────────────────────────────────────────────
+# ─── Завершение ──────────────────────────────────────────────────────────────
 if command -v steamos-update >/dev/null 2>&1; then
     log "Проверяем и применяем обновления SteamOS..."
     sudo steamos-update check || true
     sudo steamos-update || warn "Обновление SteamOS завершилось с предупреждениями"
-else
-    log "steamos-update не найден — пропускаем обновление"
 fi
 
-# ─── 6. Возврат readonly и reboot ────────────────────────────────────────────
 if command -v steamos-readonly >/dev/null 2>&1; then
     log "Возвращаем readonly режим..."
     sudo steamos-readonly enable || true
@@ -146,7 +146,7 @@ fi
 log ""
 log "──────────────────────────────────────────────"
 log "         SKIP завершён!"
-log "   ZapretDeck + автоподбор + WARP (если подключился)"
+log "   Всё установлено в $HOME/zapretdeck"
 log "   Перезагрузка через 10 секунд (Ctrl+C — отменить)"
 log "──────────────────────────────────────────────"
 sleep 10
