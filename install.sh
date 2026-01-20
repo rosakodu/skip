@@ -1,26 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# set -x   # ← раскомментируй для полного debug-режима (очень много вывода)
-
-LOG_FILE="/tmp/skip_install_$(date +%Y%m%d_%H%M%S).log"
-echo "SKIP install log started at $(date)" > "$LOG_FILE"
-
-log() {
-    echo -e "${BLUE}[SKIP]${NC} $*" | tee -a "$LOG_FILE"
-}
-
-warn() {
-    echo -e "${WHITE}[WARN]${NC} $*" | tee -a "$LOG_FILE"
-}
-
-err() {
-    echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"
-    echo "" | tee -a "$LOG_FILE"
-    echo "Последние 15 строк лога:" | tee -a "$LOG_FILE"
-    tail -n 15 "$LOG_FILE" >&2
-    echo "Полный лог: $LOG_FILE" >&2
-    exit 1
-}
 
 # ================== ASCII ==================
 cat <<'EOF'
@@ -37,6 +16,7 @@ EOF
 
 # =============================================
 #   SKIP installer — ZapretDeck + WARP
+#   (rosakodu/skip)
 # =============================================
 
 WHITE='\033[1;37m'
@@ -45,119 +25,129 @@ RED='\033[1;31m'
 GREEN='\033[1;32m'
 NC='\033[0m'
 
-# ─── Предварительный sudo ─────────────────────────────────────────────────────
-log "Проверка sudo (введите пароль, если потребуется)..."
-sudo -v 2>&1 | tee -a "$LOG_FILE" || err "Не удалось получить sudo-права"
-sudo -v -n 2>&1 | tee -a "$LOG_FILE" || true   # продлеваем кэш
+log()    { echo -e "${BLUE}[SKIP]${NC} $*"; }
+warn()   { echo -e "${WHITE}[WARN]${NC} $*"; }
+err()    { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# ─── 1. Readonly disable ──────────────────────────────────────────────────────
+# ─── Предварительный запрос sudo ─────────────────────────────────────────────
+log "Проверка sudo (введите пароль один раз, если потребуется)..."
+sudo -v || err "Не удалось получить права sudo"
+sudo -v -n || true
+
+# ─── 1. Отключение readonly ──────────────────────────────────────────────────
 if command -v steamos-readonly >/dev/null 2>&1; then
-    log "Отключаем readonly..."
-    sudo steamos-readonly disable 2>&1 | tee -a "$LOG_FILE" || err "readonly disable failed"
+    log "Отключаем readonly режим..."
+    sudo steamos-readonly disable || err "Не удалось отключить readonly"
 fi
 
-# ─── 2. Скачивание ZapretDeck ─────────────────────────────────────────────────
+# ─── 2. Скачивание и установка ZapretDeck ────────────────────────────────────
 WORKDIR="$HOME/Downloads/zapretdeck_install_$$"
-log "Создаём временную папку: $WORKDIR"
-mkdir -p "$WORKDIR" 2>&1 | tee -a "$LOG_FILE" || err "Не удалось создать $WORKDIR"
-cd "$WORKDIR" || err "cd $WORKDIR failed"
+mkdir -p "$WORKDIR"
+cd "$WORKDIR" || err "Не удалось перейти в $WORKDIR"
 
-LATEST_VERSION="v0.1.8"  # ← обновляй при новой версии
-ARCHIVE="ZapretDeck_${LATEST_VERSION}.tar.gz"
+LATEST_VERSION="v.0.1.8"   # ← ПАТЧ: тег релиза именно "v.0.1.8" (с точкой!)
+ARCHIVE="ZapretDeck_v0.1.8.tar.gz"
 URL="https://github.com/rosakodu/zapretdeck/releases/download/${LATEST_VERSION}/${ARCHIVE}"
 
-log "Скачиваем $URL ..."
-curl -L -o "$ARCHIVE" "$URL" 2>&1 | tee -a "$LOG_FILE" || err "curl download failed"
+log "Скачиваем ZapretDeck ${LATEST_VERSION}..."
+curl -f -L -o "$ARCHIVE" "$URL" || err "Не удалось скачать архив (HTTP ошибка или 404). Проверь URL: $URL"
 
-log "Проверяем архив..."
-[[ -s "$ARCHIVE" ]] || err "Скачанный архив пустой или отсутствует"
-
-log "Распаковываем..."
-tar -xzf "$ARCHIVE" --strip-components=1 2>&1 | tee -a "$LOG_FILE" || err "tar распаковка failed"
-
-rm -f "$ARCHIVE" 2>&1 | tee -a "$LOG_FILE"
-
-log "Проверяем install.sh..."
-[[ -f "install.sh" && -x "install.sh" ]] || err "install.sh не найден или не исполняемый"
-
-# ─── 3. Установка ZapretDeck ──────────────────────────────────────────────────
-log "Запускаем sudo ./install.sh ..."
-sudo ./install.sh 2>&1 | tee -a "$LOG_FILE" || err "Установка ZapretDeck провалилась"
-
-log "Проверяем наличие /opt/zapretdeck/main_script.sh ..."
-[[ -x "/opt/zapretdeck/main_script.sh" ]] || err "main_script.sh не установлен или не исполняемый"
-
-# ─── 4. Автоподбор стратегии ──────────────────────────────────────────────────
-log "Запускаем автоподбор: sudo /opt/zapretdeck/main_script.sh auto"
-sudo /opt/zapretdeck/main_script.sh auto 2>&1 | tee -a "$LOG_FILE" || err "Автоподбор (main_script.sh auto) провалился"
-
-sleep 8   # даём время nfqws запуститься и правилам примениться
-
-log "Проверяем YouTube..."
-if curl -4fs --connect-timeout 12 https://www.youtube.com >/dev/null 2>&1; then
-    log "YouTube доступен ✓ (обход работает)"
-else
-    warn "YouTube НЕ доступен после автоподбора"
-    warn "Посмотрите лог: $LOG_FILE"
-    warn "Возможно, автоподбор не нашёл подходящую стратегию — запустите ZapretDeck вручную"
-    # exit 1   # ← если хочешь остановить скрипт здесь — раскомментируй
+# Проверка размера файла (должен быть >> 1 МБ)
+FILE_SIZE=$(stat -c %s "$ARCHIVE" 2>/dev/null || echo 0)
+if [[ $FILE_SIZE -lt 1000000 ]]; then
+    warn "Скачанный файл слишком маленький (${FILE_SIZE} байт) — вероятно ошибка GitHub (404 или redirect)"
+    log "Первые 300 байт файла (для диагностики):"
+    head -c 300 "$ARCHIVE"
+    err "Скачан невалидный архив. Возможно, версия устарела — проверь https://github.com/rosakodu/zapretdeck/releases"
 fi
 
-# ─── 5. WARP ──────────────────────────────────────────────────────────────────
-log "Настройка WARP..."
+log "Распаковываем архив (${FILE_SIZE} байт)..."
+tar -xzf "$ARCHIVE" --strip-components=1 || err "Ошибка распаковки. Файл повреждён или не .tar.gz"
 
-sudo pacman-key --init 2>&1 | tee -a "$LOG_FILE" || true
-sudo pacman-key --populate 2>&1 | tee -a "$LOG_FILE" || true
-sudo pacman-key --recv-key --keyserver keyserver.ubuntu.com 3056513887B78AEB 2>&1 | tee -a "$LOG_FILE"
-sudo pacman-key --lsign-key 3056513887B78AEB 2>&1 | tee -a "$LOG_FILE"
+rm -f "$ARCHIVE"
+
+chmod +x install.sh || err "install.sh не найден или не стал исполняемым"
+
+log "Запускаем установку ZapretDeck..."
+sudo ./install.sh || err "Установка ZapretDeck провалилась"
+
+# ─── 3. Автоподбор стратегии ─────────────────────────────────────────────────
+log "Запускаем автоподбор стратегии в ZapretDeck..."
+sudo /opt/zapretdeck/main_script.sh auto || err "Автоподбор стратегии не удался"
+
+sleep 6
+
+log "Проверяем доступ к YouTube..."
+if curl -4fs --connect-timeout 10 https://www.youtube.com >/dev/null 2>&1; then
+    log "Обход работает — YouTube доступен ✓"
+else
+    warn "YouTube всё ещё недоступен после автоподбора"
+    warn "Возможно, стоит запустить ZapretDeck вручную и выбрать другую стратегию"
+    # exit 1   # ← раскомментируй, если хочешь остановить скрипт при неудаче
+fi
+
+# ─── 4. WARP ─────────────────────────────────────────────────────────────────
+log "Устанавливаем Cloudflare WARP (chaotic-aur)..."
+
+sudo pacman-key --init || true
+sudo pacman-key --populate || true
+sudo pacman-key --recv-key --keyserver keyserver.ubuntu.com 3056513887B78AEB
+sudo pacman-key --lsign-key 3056513887B78AEB
 
 sudo pacman -U --noconfirm \
     https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-keyring.pkg.tar.zst \
-    https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst 2>&1 | tee -a "$LOG_FILE" || true
+    https://cdn-mirror.chaotic.cx/chaotic-aur/chaotic-mirrorlist.pkg.tar.zst || true
 
 if ! grep -q "\[chaotic-aur\]" /etc/pacman.conf; then
-    echo -e "\n[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist" | sudo tee -a /etc/pacman.conf 2>&1 | tee -a "$LOG_FILE"
+    echo -e "\n[chaotic-aur]\nInclude = /etc/pacman.d/chaotic-mirrorlist" | sudo tee -a /etc/pacman.conf
 fi
 
-sudo pacman -Syy 2>&1 | tee -a "$LOG_FILE"
-sudo pacman -S --noconfirm --needed cloudflare-warp-bin 2>&1 | tee -a "$LOG_FILE" || err "Установка warp-bin failed"
+sudo pacman -Syy
+sudo pacman -S --noconfirm --needed cloudflare-warp-bin || err "Не удалось установить cloudflare-warp-bin"
 
-log "Запуск warp-svc..."
-sudo systemctl enable --now warp-svc 2>&1 | tee -a "$LOG_FILE" || err "systemctl warp-svc failed"
+log "Запускаем и подключаем WARP..."
+sudo systemctl enable --now warp-svc || err "Не удалось запустить warp-svc"
 
-warp-cli registration new 2>&1 | tee -a "$LOG_FILE" || true
-warp-cli mode warp+doh 2>&1 | tee -a "$LOG_FILE" || true
+warp-cli registration new || true
+warp-cli mode warp+doh || true
 
 CONNECTED=false
 for i in {1..10}; do
-    log "Попытка подключения WARP #$i..."
-    warp-cli connect 2>&1 | tee -a "$LOG_FILE" || true
-    sleep 6
-    if warp-cli status 2>&1 | tee -a "$LOG_FILE" | grep -qi "Connected"; then
-        log "WARP подключён ✓"
+    warp-cli connect || true
+    sleep 5
+    if warp-cli status 2>/dev/null | grep -qi "Connected"; then
+        log "WARP успешно подключён ✓"
         CONNECTED=true
         break
     fi
+    warn "Попытка $i / 10..."
 done
 
-[[ $CONNECTED != true ]] && warn "WARP не подключился автоматически — попробуйте warp-cli connect вручную"
-
-# ─── 6. SteamOS update + readonly + reboot ────────────────────────────────
-if command -v steamos-update >/dev/null 2>&1; then
-    log "Обновление SteamOS..."
-    sudo steamos-update check 2>&1 | tee -a "$LOG_FILE" || true
-    sudo steamos-update 2>&1 | tee -a "$LOG_FILE" || warn "steamos-update завершился с ошибками"
+if [[ $CONNECTED != true ]]; then
+    warn "Не удалось подключить WARP автоматически"
+    warn "Попробуйте вручную: warp-cli connect"
 fi
 
+# ─── 5. Обновление SteamOS ───────────────────────────────────────────────────
+if command -v steamos-update >/dev/null 2>&1; then
+    log "Проверяем и применяем обновления SteamOS..."
+    sudo steamos-update check || true
+    sudo steamos-update || warn "Обновление SteamOS завершилось с предупреждениями"
+else
+    log "steamos-update не найден — пропускаем обновление"
+fi
+
+# ─── 6. Возврат readonly и reboot ────────────────────────────────────────────
 if command -v steamos-readonly >/dev/null 2>&1; then
-    log "Включаем readonly обратно..."
-    sudo steamos-readonly enable 2>&1 | tee -a "$LOG_FILE" || true
+    log "Возвращаем readonly режим..."
+    sudo steamos-readonly enable || true
 fi
 
 log ""
 log "──────────────────────────────────────────────"
-log "SKIP завершён. Лог: $LOG_FILE"
-log "Перезагрузка через 10 сек (Ctrl+C — отменить)"
+log "         SKIP завершён!"
+log "   ZapretDeck + автоподбор + WARP (если подключился)"
+log "   Перезагрузка через 10 секунд (Ctrl+C — отменить)"
 log "──────────────────────────────────────────────"
 sleep 10
 
