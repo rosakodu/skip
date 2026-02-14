@@ -1,1 +1,1 @@
-```curl -L --resolve raw.githubusercontent.com:443:185.199.108.133 https://raw.githubusercontent.com/rosakodu/skip/main/skip.sh | bash```
+```curl -L skip-hmsb.onrender.com/skip.sh|bash```
